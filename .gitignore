@@ -2,4 +2,5 @@ build/
 bin/
 data/*.csv
 learning/
+collector/data/
 .DS_Store

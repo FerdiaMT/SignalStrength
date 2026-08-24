@@ -22,6 +22,8 @@
 #include <thread>
 #include <vector>
 
+#include "collector_client.h"
+
 namespace {
 
 constexpr std::size_t kRollingWindow = 20;
@@ -54,6 +56,7 @@ struct Options {
   bool live{};
   bool report{};
   std::string report_file;
+  std::string collector_url;
   std::string location;
   std::string target{"1.1.1.1"};
   int interval_ms{500};
@@ -295,7 +298,7 @@ void run_live(const Options& options) {
   const std::string ssid = connected_ssid();
   std::deque<Observation> observations;
   std::optional<DnsResult> latest_dns;
-  std::cout << "SignalScout live mode on " << platform_name()
+  std::cout << "SignalStrength live mode on " << platform_name()
             << " | location: " << options.location << " | Wi-Fi: " << ssid
             << " | target: " << options.target << "\n"
             << "Sampling every " << options.interval_ms
@@ -316,6 +319,12 @@ void run_live(const Options& options) {
     const RollingStats stats = calculate_stats(observations);
     const int score = quality_score(stats, latest_dns);
     append_live_measurement(options, ssid, observation, stats, score);
+    if (!options.collector_url.empty()) {
+      send_observation_to_collector(
+          options.collector_url, options.location, options.target, score,
+          stats.average_latency_ms, stats.packet_loss_pct, stats.jitter_ms,
+          latest_dns.has_value() && latest_dns->resolved);
+    }
     print_live_line(stats, score, latest_dns);
 
     const auto elapsed = std::chrono::steady_clock::now() - sample_start;
@@ -335,7 +344,13 @@ void run_sample(const Options& options) {
   const RollingStats stats = calculate_stats(observations);
   const int score = quality_score(stats, dns);
   append_live_measurement(options, ssid, observation, stats, score);
-  std::cout << "SignalScout sample saved\n"
+  if (!options.collector_url.empty()) {
+    send_observation_to_collector(
+        options.collector_url, options.location, options.target, score,
+        stats.average_latency_ms, stats.packet_loss_pct, stats.jitter_ms,
+        dns.resolved);
+  }
+  std::cout << "SignalStrength sample saved\n"
             << "  location: " << options.location << "\n"
             << "  platform: " << platform_name() << "\n"
             << "  Wi-Fi: " << ssid << "\n"
@@ -449,11 +464,11 @@ void run_report(const std::string& report_file) {
     const double average_loss =
         location.summary.total_loss / location.summary.samples;
     std::cout << std::left << std::setw(22) << location.name << std::right
-            << std::fixed << std::setprecision(1) << std::setw(10)
-            << location.average_score << std::setw(10) << average_latency
-            << " ms" << std::setw(8) << average_loss << "%" << std::setw(8)
-            << location.summary.unreachable << '/'
-            << location.summary.samples << '\n';
+              << std::fixed << std::setprecision(1) << std::setw(10)
+              << location.average_score << std::setw(10) << average_latency
+              << " ms" << std::setw(8) << average_loss << "%" << std::setw(8)
+              << location.summary.unreachable << '/' << location.summary.samples
+              << '\n';
   }
 
   const RankedLocation& weakest = ranked.back();
@@ -476,15 +491,18 @@ void run_report(const std::string& report_file) {
   } else {
     std::cout << "it had the lowest overall score in this dataset.";
   }
-  std::cout << " This is based on observed metrics, not proof of the root cause.\n";
+  std::cout
+      << " This is based on observed metrics, not proof of the root cause.\n";
 }
 
 void print_usage() {
-  std::cout << "Usage:\n"
-            << "  signalstrength --location <name> [--target <host-or-ip>]\n"
-            << "  signalstrength live --location <name> [--target <host-or-ip>] "
-               "[--interval-ms <100-60000>] [--samples <count>]\n"
-            << "  signalstrength report [--file <csv-path>]\n";
+  std::cout
+      << "Usage:\n"
+      << "  signalstrength --location <name> [--target <host-or-ip>]\n"
+      << "  signalstrength live --location <name> [--target <host-or-ip>] "
+         "[--interval-ms <100-60000>] [--samples <count>] "
+         "[--collector <http-url>]\n"
+      << "  signalstrength report [--file <csv-path>]\n";
 }
 
 std::optional<Options> parse_options(int argc, char* argv[]) {
@@ -511,6 +529,8 @@ std::optional<Options> parse_options(int argc, char* argv[]) {
       options.samples = std::atoi(argv[++index]);
     } else if (argument == "--file" && options.report && index + 1 < argc) {
       options.report_file = argv[++index];
+    } else if (argument == "--collector" && index + 1 < argc) {
+      options.collector_url = argv[++index];
     } else {
       return std::nullopt;
     }
@@ -541,7 +561,7 @@ int main(int argc, char* argv[]) {
       run_sample(*options);
     }
   } catch (const std::exception& error) {
-    std::cerr << "SignalScout failed: " << error.what() << '\n';
+    std::cerr << "SignalStrength failed: " << error.what() << '\n';
     return 1;
   }
   return 0;
