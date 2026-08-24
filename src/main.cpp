@@ -53,6 +53,7 @@ struct RollingStats {
 struct Options {
   bool live{};
   bool report{};
+  std::string report_file;
   std::string location;
   std::string target{"1.1.1.1"};
   int interval_ms{500};
@@ -373,15 +374,19 @@ std::vector<std::string> parse_csv_line(const std::string& line) {
 struct LocationSummary {
   int samples{};
   int unreachable{};
+  int dns_checks{};
+  int dns_failures{};
   double total_score{};
   double total_latency{};
+  double total_loss{};
 };
 
-void run_report() {
-  std::ifstream stream("data/live_measurements.csv");
+void run_report(const std::string& report_file) {
+  const std::string filename =
+      report_file.empty() ? "data/live_measurements_v2.csv" : report_file;
+  std::ifstream stream(filename);
   if (!stream) {
-    std::cout << "No live sessions found yet. Start one with:\n"
-              << "  ./bin/signalscout live --location \"desk\"\n";
+    std::cout << "No live sessions found in " << filename << ".\n";
     return;
   }
 
@@ -390,20 +395,31 @@ void run_report() {
   std::map<std::string, LocationSummary> summaries;
   while (std::getline(stream, line)) {
     const std::vector<std::string> fields = parse_csv_line(line);
-    if (fields.size() != 13) continue;
+    const bool enhanced_format = fields.size() == 17;
+    if (!enhanced_format && fields.size() != 13) continue;
     try {
+      const std::size_t reachable_index = enhanced_format ? 9 : 5;
+      const std::size_t latency_index = enhanced_format ? 10 : 6;
+      const std::size_t loss_index = enhanced_format ? 11 : 7;
+      const std::size_t dns_ok_index = enhanced_format ? 14 : 10;
+      const std::size_t score_index = enhanced_format ? 16 : 12;
       LocationSummary& summary = summaries[fields[2]];
       ++summary.samples;
-      summary.unreachable += fields[5] == "true" ? 0 : 1;
-      summary.total_latency += std::stod(fields[6]);
-      summary.total_score += std::stod(fields[12]);
+      summary.unreachable += fields[reachable_index] == "true" ? 0 : 1;
+      summary.total_latency += std::stod(fields[latency_index]);
+      summary.total_loss += std::stod(fields[loss_index]);
+      summary.total_score += std::stod(fields[score_index]);
+      if (!fields[dns_ok_index].empty()) {
+        ++summary.dns_checks;
+        summary.dns_failures += fields[dns_ok_index] == "true" ? 0 : 1;
+      }
     } catch (const std::exception&) {
       // Ignore malformed rows rather than making one bad observation hide a
       // useful report.
     }
   }
   if (summaries.empty()) {
-    std::cout << "No valid observations found in data/live_measurements.csv.\n";
+    std::cout << "No valid observations found in " << filename << ".\n";
     return;
   }
 
@@ -422,39 +438,53 @@ void run_report() {
               return left.average_score > right.average_score;
             });
 
-  std::cout << "SignalScout location report\n";
+  std::cout << "SignalStrength location report\n";
   std::cout << std::left << std::setw(22) << "LOCATION" << std::right
             << std::setw(10) << "SCORE" << std::setw(12) << "LATENCY"
-            << std::setw(14) << "UNREACHABLE" << '\n';
+            << std::setw(10) << "LOSS" << std::setw(14) << "UNREACHABLE"
+            << '\n';
   for (const RankedLocation& location : ranked) {
     const double average_latency =
         location.summary.total_latency / location.summary.samples;
+    const double average_loss =
+        location.summary.total_loss / location.summary.samples;
     std::cout << std::left << std::setw(22) << location.name << std::right
-              << std::fixed << std::setprecision(1) << std::setw(10)
-              << location.average_score << std::setw(10) << average_latency
-              << " ms" << std::setw(10) << location.summary.unreachable << '/'
-              << location.summary.samples << '\n';
+            << std::fixed << std::setprecision(1) << std::setw(10)
+            << location.average_score << std::setw(10) << average_latency
+            << " ms" << std::setw(8) << average_loss << "%" << std::setw(8)
+            << location.summary.unreachable << '/'
+            << location.summary.samples << '\n';
   }
 
   const RankedLocation& weakest = ranked.back();
+  const double weakest_loss =
+      weakest.summary.total_loss / weakest.summary.samples;
+  const double weakest_latency =
+      weakest.summary.total_latency / weakest.summary.samples;
   std::cout << "\nWeakest location: " << weakest.name << " (" << std::fixed
             << std::setprecision(1) << weakest.average_score
-            << "/100 average). ";
-  if (weakest.summary.unreachable > 0) {
-    std::cout << "It had unreachable probes, indicating coverage or "
-                 "connectivity instability.\n";
+            << "/100 average). Likely contributor: ";
+  const double unreachable_percent =
+      100.0 * weakest.summary.unreachable / weakest.summary.samples;
+  if (weakest_loss >= 5.0 || unreachable_percent >= 5.0) {
+    std::cout << "packet loss or unreachable probes were observed.";
+  } else if (weakest.summary.dns_checks > 0 &&
+             weakest.summary.dns_failures > 0) {
+    std::cout << "DNS failures were observed.";
+  } else if (weakest_latency >= 80.0) {
+    std::cout << "latency was comparatively high.";
   } else {
-    std::cout << "It remained reachable, but its rolling quality score was the "
-                 "lowest.\n";
+    std::cout << "it had the lowest overall score in this dataset.";
   }
+  std::cout << " This is based on observed metrics, not proof of the root cause.\n";
 }
 
 void print_usage() {
   std::cout << "Usage:\n"
-            << "  signalscout --location <name> [--target <host-or-ip>]\n"
-            << "  signalscout live --location <name> [--target <host-or-ip>] "
+            << "  signalstrength --location <name> [--target <host-or-ip>]\n"
+            << "  signalstrength live --location <name> [--target <host-or-ip>] "
                "[--interval-ms <100-60000>] [--samples <count>]\n"
-            << "  signalscout report\n";
+            << "  signalstrength report [--file <csv-path>]\n";
 }
 
 std::optional<Options> parse_options(int argc, char* argv[]) {
@@ -479,6 +509,8 @@ std::optional<Options> parse_options(int argc, char* argv[]) {
       options.interval_ms = std::atoi(argv[++index]);
     } else if (argument == "--samples" && index + 1 < argc) {
       options.samples = std::atoi(argv[++index]);
+    } else if (argument == "--file" && options.report && index + 1 < argc) {
+      options.report_file = argv[++index];
     } else {
       return std::nullopt;
     }
@@ -502,7 +534,7 @@ int main(int argc, char* argv[]) {
   std::signal(SIGINT, request_stop);
   try {
     if (options->report) {
-      run_report();
+      run_report(options->report_file);
     } else if (options->live) {
       run_live(*options);
     } else {
