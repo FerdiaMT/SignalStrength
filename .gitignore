@@ -1,0 +1,5 @@
+build/
+bin/
+data/*.csv
+learning/
+.DS_Store
